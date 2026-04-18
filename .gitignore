@@ -1,0 +1,9 @@
+# Ignore the virtual environment (it's too big!)
+venv/
+
+# Ignore temporary Python files
+__pycache__/
+*.pyc
+
+# Ignore local settings
+.env
