@@ -1,4 +1,4 @@
 {
-    "python.defaultInterpreterPath": "${workspaceFolder}\\venv\\Scripts\\python.exe",
+    "python.defaultInterpreterPath": "c:\\projects\\video-to-text\\venv\\Scripts\\python.exe",
     "python.terminal.activateEnvInSelectedTerminal": true
 }
