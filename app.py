@@ -18,10 +18,17 @@ class TranscriptionEngine:
         self._model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    def set_model_size(self, size):
+        """Updates the model size and clears the cached model if it changed."""
+        if size != self.model_size:
+            self.model_size = size
+            self._model = None # Clear cached model to force reload
+
     @property
     def model(self):
         """Lazy loading of the Whisper model."""
         if self._model is None:
+            print(f"Loading Whisper model: {self.model_size}...")
             self._model = whisper.load_model(self.model_size, device=self.device)
         return self._model
 
@@ -85,28 +92,45 @@ class VideoToTextApp(ctk.CTk):
     def setup_ui(self):
         """Initializes the layout and widgets."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure((0, 1, 2, 3, 4), weight=1)
+        self.grid_rowconfigure((0, 1, 2, 3, 4, 5), weight=1)
 
         # Title/Instruction
         self.lbl_title = ctk.CTkLabel(self, text="Video to Text", font=ctk.CTkFont(size=24, weight="bold"))
         self.lbl_title.grid(row=0, column=0, padx=20, pady=(20, 10))
 
+        # Model Selection Frame
+        self.frame_settings = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_settings.grid(row=1, column=0, padx=20, pady=0)
+        
+        self.lbl_model = ctk.CTkLabel(self.frame_settings, text="Model Size:", font=ctk.CTkFont(size=13))
+        self.lbl_model.pack(side="left", padx=10)
+        
+        self.combo_model = ctk.CTkComboBox(self.frame_settings, values=["tiny", "base", "small"], 
+                                          command=self.handle_model_change)
+        self.combo_model.set("base")
+        self.combo_model.pack(side="left", padx=10)
+
         self.lbl_info = ctk.CTkLabel(self, text="Select an MP4 video to generate a text transcript.", text_color="gray")
-        self.lbl_info.grid(row=1, column=0, padx=20, pady=0)
+        self.lbl_info.grid(row=2, column=0, padx=20, pady=(10, 0))
 
         # Main Action Button
         self.btn_select = ctk.CTkButton(self, text="Start Transcribe", 
                                         command=self.handle_select_file,
                                         height=45, corner_radius=10,
                                         font=ctk.CTkFont(size=15, weight="bold"))
-        self.btn_select.grid(row=2, column=0, padx=20, pady=20)
+        self.btn_select.grid(row=3, column=0, padx=20, pady=20)
 
         # Status & Progress
         self.lbl_status = ctk.CTkLabel(self, text="Status: Ready", text_color="#2ecc71") # Greenish
-        self.lbl_status.grid(row=3, column=0, padx=20, pady=5)
+        self.lbl_status.grid(row=4, column=0, padx=20, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal", mode="indeterminate")
         self.progress_bar.set(0) # Initially empty
+
+    def handle_model_change(self, value):
+        """Updates the engine model size when the dropdown changes."""
+        self.engine.set_model_size(value)
+        self.update_status(f"Model set to {value}", "cyan")
 
     def update_status(self, text, color=None):
         """Thread-safe status update."""
@@ -129,7 +153,8 @@ class VideoToTextApp(ctk.CTk):
     def start_processing(self, file_path):
         """Prepares the UI and starts the background thread."""
         self.btn_select.configure(state="disabled")
-        self.progress_bar.grid(row=4, column=0, padx=20, pady=10)
+        self.combo_model.configure(state="disabled")
+        self.progress_bar.grid(row=5, column=0, padx=20, pady=10)
         self.progress_bar.start()
         self.update_status("Processing... Please wait.", "yellow")
 
@@ -157,6 +182,7 @@ class VideoToTextApp(ctk.CTk):
         self.progress_bar.stop()
         self.progress_bar.grid_forget()
         self.btn_select.configure(state="normal")
+        self.combo_model.configure(state="normal")
         self.update_status("Finished!", "#2ecc71")
 
         # Save Logic
@@ -180,6 +206,7 @@ class VideoToTextApp(ctk.CTk):
         self.progress_bar.stop()
         self.progress_bar.grid_forget()
         self.btn_select.configure(state="normal")
+        self.combo_model.configure(state="normal")
         self.update_status("Error encountered.", "#e74c3c") # Red
         messagebox.showerror("Error", f"An error occurred:\n{error_msg}")
 

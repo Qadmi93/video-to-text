@@ -136,5 +136,29 @@ graph TD
 *   **Modularity:** Isolated business logic into `TranscriptionEngine` class.
 *   **Dependency:** Added `customtkinter` to the environment.
 
+*This log is maintained to ensure continuity in development sessions.*
+
+---
+### Session 4: Performance & Model Flexibility (2026-04-23)
+**Current Status:** UI stabilized. Planning feature expansion.
+**Focus:** Resource optimization, Model selection, and Extended Export options.
+
+### Learning Note: Compute vs. Quality Trade-offs
+*   **The Whisper Spectrum:** Whisper models range from `tiny` (fastest, least accurate) to `large` (slowest, most accurate). 
+*   **Dynamic Loading:** Implementing a way to switch models within the UI allows users on weaker hardware (like the Acer Aspire with 920M) to use `tiny` while those with better GPUs can use `base` or `small`.
+*   **VRAM Management:** Larger models require more VRAM. Checking `torch.cuda.get_device_properties` can help the app suggest the best model for the current hardware.
+
+### Learning Note: Context Managers & Resource Safety
+*   **The `with` statement:** When saving files, using `with open(...)` ensures the file is closed correctly even if an error occurs.
+*   **Garbage Collection:** After transcribing, clearing large audio arrays from memory helps prevent the app from slowing down over multiple runs.
+
+### Implemented Features:
+1.  **Model Selector:** Added a dropdown to choose between Tiny, Base, and Small models. Dynamically reloads the Whisper model on demand.
+
+### Planned Improvements:
+1.  **Export Options:** Allow saving as SRT (Subtitles) in addition to TXT.
+2.  **Real-time Feedback:** Display segments as they are transcribed.
+
 ---
 *This log is maintained to ensure continuity in development sessions.*
+
