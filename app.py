@@ -170,7 +170,8 @@ class VideoToTextApp(ctk.CTk):
         self.lbl_model = ctk.CTkLabel(self.frame_settings, text="Model Size:", font=ctk.CTkFont(size=13))
         self.lbl_model.pack(side="left", padx=10)
         
-        self.combo_model = ctk.CTkComboBox(self.frame_settings, values=["tiny", "base", "small"], 
+        self.combo_model = ctk.CTkComboBox(self.frame_settings, 
+                                          values=["tiny", "base", "small", "medium", "large", "turbo"], 
                                           command=self.handle_model_change)
         self.combo_model.set("base")
         self.combo_model.pack(side="left", padx=10)

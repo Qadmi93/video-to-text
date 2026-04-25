@@ -195,3 +195,14 @@ graph TD
 
 ---
 *This log is maintained to ensure continuity in development sessions.*
+
+### Session 7: Model Expansion & Hardware Optimization (2026-04-25)
+**Current Status:** Expanded model selection to include all flagship Whisper tiers.
+**Focus:** Compute-heavy models (Medium/Large) and the high-efficiency Turbo model.
+
+### Learning Note: The "Turbo" Advantage
+*   **Discovery:** Turbo provides Large-v3 level accuracy while using significantly less compute time. It is the ideal choice for high-quality production without the "Large" wait times.
+*   **VRAM Awareness:** Larger models require more memory. If the app crashes on "Large," it's usually because the computer ran out of memory (OOM).
+
+---
+*This log is maintained to ensure continuity in development sessions.*
