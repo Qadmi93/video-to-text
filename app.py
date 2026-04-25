@@ -14,6 +14,22 @@ import torch
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
+# Optional imports for new engines
+try:
+    import stable_whisper
+except ImportError:
+    stable_whisper = None
+
+try:
+    import assemblyai as aai
+except ImportError:
+    aai = None
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
+
 # --- Business Logic: Transcription Engines ---
 
 class BaseEngine:
@@ -114,9 +130,9 @@ class FasterWhisperEngine(BaseEngine):
             self._model = WhisperModel(self.model_size, device=self.device, compute_type=compute_type)
         return self._model
 
-    def transcribe(self, audio_data, callback=None):
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
         audio_float = audio_data.astype(np.float32) / 32768.0
-        segments, info = self.model.transcribe(audio_float, beam_size=5)
+        segments, info = self.model.transcribe(audio_float, beam_size=5, task=task)
         
         all_segments = []
         full_text = ""
@@ -125,7 +141,12 @@ class FasterWhisperEngine(BaseEngine):
             all_segments.append(seg_dict)
             full_text += segment.text + " "
             if callback: callback(seg_dict)
-        return {"text": full_text.strip(), "segments": all_segments}
+        return {
+            "text": full_text.strip(), 
+            "segments": all_segments,
+            "language": info.language,
+            "language_probability": info.language_probability
+        }
 
 class StandardWhisperEngine(BaseEngine):
     def __init__(self, model_size="base"):
@@ -145,12 +166,14 @@ class StandardWhisperEngine(BaseEngine):
             self._model = whisper.load_model(self.model_size, device=self.device)
         return self._model
 
-    def transcribe(self, audio_data, callback=None):
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
         audio_float = audio_data.astype(np.float32) / 32768.0
-        result = self.model.transcribe(audio_float, fp16=torch.cuda.is_available())
+        result = self.model.transcribe(audio_float, fp16=torch.cuda.is_available(), task=task)
         if callback and "segments" in result:
             for segment in result["segments"]:
                 callback(segment)
+        
+        # Standard whisper result already has 'language'
         return result
 
 class VoskEngine(BaseEngine):
@@ -181,7 +204,7 @@ class VoskEngine(BaseEngine):
                 raise RuntimeError(f"Vosk model error: {e}. Please ensure a Vosk model folder is present in the project directory.")
         return self._model
 
-    def transcribe(self, audio_data, callback=None):
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
         rec = vosk.KaldiRecognizer(self.model, 16000)
         rec.SetWords(True)
         
@@ -210,6 +233,148 @@ class VoskEngine(BaseEngine):
             
         return {"text": full_text.strip(), "segments": all_segments}
 
+class StableTSEngine(BaseEngine):
+    """Uses stable-ts for better timestamps and less hallucination."""
+    def __init__(self, model_size="base"):
+        self.model_size = model_size
+        self._model = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def set_model_size(self, size):
+        if size != self.model_size:
+            self.model_size = size
+            self._model = None
+
+    @property
+    def model(self):
+        if stable_whisper is None:
+            raise ImportError("stable-ts not installed. Run: pip install stable-ts")
+        if self._model is None:
+            print(f"Loading Stable-TS (Faster-Backend) model: {self.model_size}...")
+            # Use faster-whisper backend for significantly better performance on 920M
+            try:
+                self._model = stable_whisper.load_faster_whisper(self.model_size, device=self.device)
+            except Exception:
+                # Fallback to standard if faster-whisper backend fails
+                self._model = stable_whisper.load_model(self.model_size, device=self.device)
+        return self._model
+
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
+        audio_float = audio_data.astype(np.float32) / 32768.0
+        result = self.model.transcribe(audio_float, task=task)
+        # stable-ts result is an object, convert to dict-like
+        segments = []
+        for s in result.segments:
+            seg = {"text": s.text, "start": s.start, "end": s.end}
+            segments.append(seg)
+            if callback: callback(seg)
+        return {"text": result.text, "segments": segments}
+
+class AssemblyAIEngine(BaseEngine):
+    """Premium Cloud API for high-accuracy transcription."""
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+
+    def set_model_size(self, size):
+        pass
+
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
+        if aai is None:
+            raise ImportError("assemblyai not installed. Run: pip install assemblyai")
+        if not self.api_key:
+            raise ValueError("AssemblyAI API Key is required.")
+        
+        aai.settings.api_key = self.api_key
+        
+        # Save to temp wav for upload
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            import wave
+            with wave.open(tf.name, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(audio_data.tobytes())
+            temp_path = tf.name
+
+        try:
+            transcriber = aai.Transcriber()
+            config = aai.TranscriptionConfig(language_detection=True)
+            transcript = transcriber.transcribe(temp_path, config=config)
+            
+            if transcript.status == aai.TranscriptStatus.error:
+                raise RuntimeError(f"AssemblyAI Error: {transcript.error}")
+
+            segments = []
+            sentences = transcript.get_sentences()
+            for s in sentences:
+                seg = {"text": s.text, "start": s.start / 1000.0, "end": s.end / 1000.0}
+                segments.append(seg)
+                if callback: callback(seg)
+
+            return {"text": transcript.text, "segments": segments}
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+class GroqEngine(BaseEngine):
+    """Ultra-fast Cloud Whisper (Large-v3)."""
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+
+    def set_model_size(self, size):
+        pass
+
+    def transcribe(self, audio_data, callback=None, task="transcribe"):
+        if Groq is None:
+            raise ImportError("groq not installed. Run: pip install groq")
+        if not self.api_key:
+            raise ValueError("Groq API Key is required.")
+        
+        client = Groq(api_key=self.api_key)
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            import wave
+            with wave.open(tf.name, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(audio_data.tobytes())
+            temp_path = tf.name
+
+        try:
+            with open(temp_path, "rb") as file:
+                # Always use verbose_json to get segment-level data for subtitles
+                if task == "translate":
+                    response = client.audio.translations.create(
+                        file=(temp_path, file.read()),
+                        model="whisper-large-v3",
+                        response_format="verbose_json"
+                    )
+                else:
+                    response = client.audio.transcriptions.create(
+                        file=(temp_path, file.read()),
+                        model="whisper-large-v3",
+                        response_format="verbose_json"
+                    )
+                
+                segments = []
+                # Safely handle segments (could be dicts or objects depending on SDK version)
+                raw_segments = getattr(response, 'segments', [])
+                for s in raw_segments:
+                    # Extract values safely
+                    text = s.get('text', '') if isinstance(s, dict) else getattr(s, 'text', '')
+                    start = s.get('start', 0.0) if isinstance(s, dict) else getattr(s, 'start', 0.0)
+                    end = s.get('end', 0.0) if isinstance(s, dict) else getattr(s, 'end', 0.0)
+                    
+                    seg = {"text": text, "start": start, "end": end}
+                    segments.append(seg)
+                    if callback: callback(seg)
+                    
+                return {"text": response.text, "segments": segments}
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
 # --- UI Logic: Modern Application ---
 
 class VideoToTextApp(ctk.CTk):
@@ -228,17 +393,43 @@ class VideoToTextApp(ctk.CTk):
         self.engines = {
             "Faster-Whisper": FasterWhisperEngine(),
             "Standard Whisper": StandardWhisperEngine(),
-            "Vosk (Offline/Fast)": VoskEngine()
+            "Stable-TS (Precision)": StableTSEngine(),
+            "Vosk (Offline/Fast)": VoskEngine(),
+            "AssemblyAI (Cloud)": AssemblyAIEngine(),
+            "Groq (Cloud/Fast)": GroqEngine()
         }
         self.active_engine_name = "Faster-Whisper"
+        self.config_file = "config.json"
+        self.settings = self.load_settings()
 
         # UI Elements
         self.setup_ui()
 
+    def load_settings(self):
+        """Loads saved settings (like API keys) from a JSON file."""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r") as f:
+                    data = json.load(f)
+                    if "api_keys" not in data:
+                        data["api_keys"] = {}
+                    return data
+            except Exception:
+                pass
+        return {"api_keys": {}}
+
+    def save_settings(self):
+        """Saves current settings to a JSON file."""
+        try:
+            with open(self.config_file, "w") as f:
+                json.dump(self.settings, f, indent=4)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
     def setup_ui(self):
         """Initializes the layout and widgets."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1) # Allow the textbox to expand
+        self.grid_rowconfigure(5, weight=1) # Allow the textbox to expand
 
         # Title/Instruction
         self.lbl_title = ctk.CTkLabel(self, text="AI Video to Text", font=ctk.CTkFont(size=24, weight="bold"))
@@ -262,42 +453,84 @@ class VideoToTextApp(ctk.CTk):
         self.lbl_model.pack(side="left", padx=5)
         
         self.combo_model = ctk.CTkComboBox(self.frame_settings, 
-                                           values=["tiny", "base", "small", "medium", "large", "turbo"], 
+                                           values=["tiny", "base", "small", "medium", "large", "large-v3", "turbo"], 
                                            command=self.handle_model_change,
                                            width=100)
         self.combo_model.set("base")
         self.combo_model.pack(side="left", padx=5)
+
+        # API Key Field (Hidden by default)
+        self.frame_api = ctk.CTkFrame(self, fg_color="transparent")
+        self.lbl_api = ctk.CTkLabel(self.frame_api, text="API Key:", font=ctk.CTkFont(size=13))
+        self.lbl_api.pack(side="left", padx=5)
+        self.entry_api = ctk.CTkEntry(self.frame_api, placeholder_text="Enter API Key here...", width=250, show="*")
+        self.entry_api.pack(side="left", padx=5)
+        # frame_api is NOT packed yet, we'll pack it when needed
+
+        # Options Frame (Translation & Burning)
+        self.frame_options = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_options.grid(row=2, column=0, padx=20, pady=5)
+
+        self.check_translate = ctk.CTkCheckBox(self.frame_options, text="Translate to English")
+        self.check_translate.pack(side="left", padx=10)
+
+        self.check_burn = ctk.CTkCheckBox(self.frame_options, text="Burn subtitles")
+        self.check_burn.pack(side="left", padx=10)
 
         # Main Action Button
         self.btn_select = ctk.CTkButton(self, text="Start Transcribe", 
                                         command=self.handle_select_file,
                                         height=45, corner_radius=10,
                                         font=ctk.CTkFont(size=15, weight="bold"))
-        self.btn_select.grid(row=2, column=0, padx=20, pady=10)
+        self.btn_select.grid(row=3, column=0, padx=20, pady=10)
 
-        # Burn Subtitles Checkbox
-        self.check_burn = ctk.CTkCheckBox(self, text="Burn subtitles into video?")
-        self.check_burn.grid(row=3, column=0, padx=20, pady=5)
+        # Detected Language Display
+        self.lbl_lang = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray")
+        self.lbl_lang.grid(row=4, column=0, padx=20, pady=0)
 
         # Live Transcript Textbox
         self.textbox = ctk.CTkTextbox(self, height=200, corner_radius=10)
-        self.textbox.grid(row=4, column=0, padx=20, pady=10, sticky="nsew")
+        self.textbox.grid(row=5, column=0, padx=20, pady=10, sticky="nsew")
         self.textbox.insert("0.0", "Transcription will appear here...")
 
         # Status & Progress
         self.lbl_status = ctk.CTkLabel(self, text="Status: Ready", text_color="#2ecc71") # Greenish
-        self.lbl_status.grid(row=5, column=0, padx=20, pady=5)
+        self.lbl_status.grid(row=6, column=0, padx=20, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal", mode="indeterminate")
+        self.progress_bar.grid(row=7, column=0, padx=20, pady=10)
         self.progress_bar.set(0) # Initially empty
+        self.progress_bar.grid_forget()
 
     def handle_engine_change(self, value):
         """Updates the active engine and adjusts UI options."""
         self.active_engine_name = value
-        if "Vosk" in value:
-            self.combo_model.configure(state="disabled")
-        else:
+        
+        # Show/Hide Model Selector
+        if value in ["Faster-Whisper", "Standard Whisper", "Stable-TS (Precision)"]:
+            self.lbl_model.pack(side="left", padx=5)
+            self.combo_model.pack(side="left", padx=5)
             self.combo_model.configure(state="normal")
+        else:
+            self.lbl_model.pack_forget()
+            self.combo_model.pack_forget()
+
+        # Show/Hide API Key field
+        if "Cloud" in value:
+            self.frame_api.grid(row=2, column=0, padx=20, pady=5)
+            # Auto-fill saved key
+            saved_key = self.settings.get("api_keys", {}).get(value, "")
+            self.entry_api.delete(0, "end")
+            self.entry_api.insert(0, saved_key)
+            
+            # Push other frames down
+            self.frame_options.grid(row=3, column=0, padx=20, pady=5)
+            self.btn_select.grid(row=4, column=0, padx=20, pady=10)
+        else:
+            self.frame_api.grid_forget()
+            self.frame_options.grid(row=2, column=0, padx=20, pady=5)
+            self.btn_select.grid(row=3, column=0, padx=20, pady=10)
+
         self.update_status(f"Engine set to {value}", "cyan")
 
     def handle_model_change(self, value):
@@ -336,33 +569,60 @@ class VideoToTextApp(ctk.CTk):
         self.btn_select.configure(state="disabled")
         self.combo_model.configure(state="disabled")
         self.check_burn.configure(state="disabled")
+        self.check_translate.configure(state="disabled")
+        self.lbl_lang.configure(text="")
         self.textbox.delete("0.0", "end")
         self.textbox.insert("0.0", "Starting transcription...")
-        self.progress_bar.grid(row=6, column=0, padx=20, pady=10)
+        self.progress_bar.grid(row=7, column=0, padx=20, pady=10)
         self.progress_bar.start()
         self.update_status("Processing... Please wait.", "yellow")
 
         # Background Execution
         should_burn = self.check_burn.get()
-        thread = threading.Thread(target=self.process_video_task, args=(file_path, should_burn), daemon=True)
+        should_translate = self.check_translate.get()
+        task = "translate" if should_translate else "transcribe"
+        
+        thread = threading.Thread(target=self.process_video_task, 
+                                  args=(file_path, should_burn, task), 
+                                  daemon=True)
         thread.start()
 
-    def process_video_task(self, video_path, should_burn):
+    def get_api_key(self):
+        """Retrieves the API key from the entry field."""
+        return self.entry_api.get().strip()
+
+    def process_video_task(self, video_path, should_burn, task):
         """The worker method running in a separate thread."""
         try:
             engine = self.engines[self.active_engine_name]
+            
+            # Set API Key for cloud engines and SAVE it
+            if hasattr(engine, "api_key"):
+                key = self.get_api_key()
+                engine.api_key = key
+                if key:
+                    self.settings["api_keys"][self.active_engine_name] = key
+                    self.save_settings()
             
             self.update_status("Extracting audio...", "cyan")
             audio_data = engine.extract_audio(video_path)
             
             self.update_status(f"Transcribing ({self.active_engine_name})...", "orange")
-            result = engine.transcribe(audio_data, callback=self.engine_callback)
+            result = engine.transcribe(audio_data, callback=self.engine_callback, task=task)
             
+            # Update detected language in UI
+            if "language" in result:
+                lang = result["language"]
+                prob = result.get("language_probability", 1.0)
+                lang_text = f"Detected Language: {lang} ({prob:.1%})"
+                self.after(0, lambda: self.lbl_lang.configure(text=lang_text))
+
             # Switch back to main thread for UI/Dialogs
             self.after(0, lambda: self.finish_processing(video_path, result, should_burn))
             
         except Exception as e:
-            self.after(0, lambda: self.handle_error(str(e)))
+            error_msg = str(e)
+            self.after(0, lambda: self.handle_error(error_msg))
 
     def finish_processing(self, video_path, result, should_burn):
         """Cleans up UI and prompts to save."""
@@ -373,6 +633,7 @@ class VideoToTextApp(ctk.CTk):
         self.combo_model.configure(state="normal")
         self.combo_engine.configure(state="normal")
         self.check_burn.configure(state="normal")
+        self.check_translate.configure(state="normal")
         self.update_status("Finished!", "#2ecc71")
 
         transcript_text = result["text"].strip()
@@ -436,7 +697,8 @@ class VideoToTextApp(ctk.CTk):
                         if os.path.exists(temp_srt_path):
                             os.remove(temp_srt_path)
                 except Exception as e:
-                    self.after(0, lambda: self.handle_error(str(e)))
+                    error_msg = str(e)
+                    self.after(0, lambda: self.handle_error(error_msg))
                 finally:
                     self.after(0, lambda: self.btn_select.configure(state="normal"))
 

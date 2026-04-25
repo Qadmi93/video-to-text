@@ -17,4 +17,7 @@ model/
 *.mp3
 *.wav
 *.srt
-*.txt
+*.txt
+
+# Ignore secret API keys
+config.json
