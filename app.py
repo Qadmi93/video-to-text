@@ -1,6 +1,9 @@
 import os
 import threading
 import subprocess
+import datetime
+import math
+import tempfile
 import numpy as np
 import whisper
 import imageio_ffmpeg
@@ -64,10 +67,72 @@ class TranscriptionEngine:
 
         return np.concatenate(audio_chunks).astype(np.float32) / 32768.0
 
-    def transcribe(self, audio_array):
+    def format_timestamp(self, seconds: float):
+        """Converts seconds to SRT timestamp format: HH:MM:SS,mmm"""
+        tdelta = datetime.timedelta(seconds=seconds)
+        str_td = str(tdelta)
+        if "." in str_td:
+            time_part, micro_part = str_td.split(".")
+            milli_part = micro_part[:3]
+        else:
+            time_part = str_td
+            milli_part = "000"
+            
+        # Ensure HH:MM:SS format
+        parts = time_part.split(":")
+        if len(parts[0]) == 1:
+            parts[0] = "0" + parts[0]
+        time_part = ":".join(parts)
+            
+        return f"{time_part},{milli_part}"
+
+    def generate_srt(self, segments):
+        """Converts Whisper segments into a formatted SRT string."""
+        srt_content = ""
+        for i, segment in enumerate(segments, start=1):
+            start = self.format_timestamp(segment['start'])
+            end = self.format_timestamp(segment['end'])
+            text = segment['text'].strip()
+            srt_content += f"{i}\n{start} --> {end}\n{text}\n\n"
+        return srt_content
+
+    def transcribe(self, audio_array, callback=None):
         """Runs the transcription using the Whisper model."""
-        result = self.model.transcribe(audio_array, fp16=torch.cuda.is_available())
-        return result["text"].strip()
+        result = self.model.transcribe(
+            audio_array, 
+            fp16=torch.cuda.is_available(),
+            verbose=False
+        )
+        
+        # If a callback is provided, we simulate the live feed by iterating
+        if callback and "segments" in result:
+            for segment in result["segments"]:
+                callback(segment)
+
+        return result
+
+    def burn_subtitles(self, video_path, srt_path, output_path):
+        """Hardcodes subtitles into a video file using FFmpeg filters."""
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        
+        # FFmpeg subtitle filter needs specific escaping for Windows paths
+        # Convert C:\path\file.srt to C\\:/path/file.srt
+        escaped_path = srt_path.replace("\\", "/").replace(":", "\\:")
+        
+        cmd = [
+            ffmpeg_exe,
+            "-y", # Overwrite output if it exists
+            "-i", video_path,
+            "-vf", f"subtitles='{escaped_path}'",
+            "-c:a", "copy", # Copy audio stream without re-encoding to save time
+            output_path
+        ]
+        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"FFmpeg burning error: {stderr.decode('utf-8', errors='ignore')}")
 
 # --- UI Logic: Modern Application ---
 
@@ -79,7 +144,7 @@ class VideoToTextApp(ctk.CTk):
 
         # Window Configuration
         self.title("Video to Text Transcriber")
-        self.geometry("500x350")
+        self.geometry("600x600")
         ctk.set_appearance_mode("dark")  # Options: "System", "Light", "Dark"
         ctk.set_default_color_theme("blue")  # Options: "blue", "green", "dark-blue"
 
@@ -92,7 +157,7 @@ class VideoToTextApp(ctk.CTk):
     def setup_ui(self):
         """Initializes the layout and widgets."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure((0, 1, 2, 3, 4, 5), weight=1)
+        self.grid_rowconfigure(3, weight=1) # Allow the textbox to expand
 
         # Title/Instruction
         self.lbl_title = ctk.CTkLabel(self, text="Video to Text", font=ctk.CTkFont(size=24, weight="bold"))
@@ -110,19 +175,25 @@ class VideoToTextApp(ctk.CTk):
         self.combo_model.set("base")
         self.combo_model.pack(side="left", padx=10)
 
-        self.lbl_info = ctk.CTkLabel(self, text="Select an MP4 video to generate a text transcript.", text_color="gray")
-        self.lbl_info.grid(row=2, column=0, padx=20, pady=(10, 0))
-
         # Main Action Button
         self.btn_select = ctk.CTkButton(self, text="Start Transcribe", 
                                         command=self.handle_select_file,
                                         height=45, corner_radius=10,
                                         font=ctk.CTkFont(size=15, weight="bold"))
-        self.btn_select.grid(row=3, column=0, padx=20, pady=20)
+        self.btn_select.grid(row=2, column=0, padx=20, pady=10)
+
+        # Burn Subtitles Checkbox
+        self.check_burn = ctk.CTkCheckBox(self, text="Burn subtitles into video?")
+        self.check_burn.grid(row=4, column=0, padx=20, pady=5)
+
+        # Live Transcript Textbox
+        self.textbox = ctk.CTkTextbox(self, height=200, corner_radius=10)
+        self.textbox.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
+        self.textbox.insert("0.0", "Transcription will appear here...")
 
         # Status & Progress
         self.lbl_status = ctk.CTkLabel(self, text="Status: Ready", text_color="#2ecc71") # Greenish
-        self.lbl_status.grid(row=4, column=0, padx=20, pady=5)
+        self.lbl_status.grid(row=5, column=0, padx=20, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal", mode="indeterminate")
         self.progress_bar.set(0) # Initially empty
@@ -140,6 +211,14 @@ class VideoToTextApp(ctk.CTk):
                 self.lbl_status.configure(text_color=color)
         self.after(0, task)
 
+    def engine_callback(self, segment):
+        """Called by the engine for each new segment transcribed."""
+        text = segment['text'].strip()
+        def task():
+            self.textbox.insert("end", f"\n{text}")
+            self.textbox.see("end")
+        self.after(0, task)
+
     def handle_select_file(self):
         """Opens file dialog and starts processing."""
         file_path = filedialog.askopenfilename(
@@ -154,52 +233,109 @@ class VideoToTextApp(ctk.CTk):
         """Prepares the UI and starts the background thread."""
         self.btn_select.configure(state="disabled")
         self.combo_model.configure(state="disabled")
-        self.progress_bar.grid(row=5, column=0, padx=20, pady=10)
+        self.check_burn.configure(state="disabled")
+        self.textbox.delete("0.0", "end")
+        self.textbox.insert("0.0", "Starting transcription...")
+        self.progress_bar.grid(row=6, column=0, padx=20, pady=10)
         self.progress_bar.start()
         self.update_status("Processing... Please wait.", "yellow")
 
         # Background Execution
-        thread = threading.Thread(target=self.process_video_task, args=(file_path,), daemon=True)
+        should_burn = self.check_burn.get()
+        thread = threading.Thread(target=self.process_video_task, args=(file_path, should_burn), daemon=True)
         thread.start()
 
-    def process_video_task(self, video_path):
+    def process_video_task(self, video_path, should_burn):
         """The worker method running in a separate thread."""
         try:
             self.update_status("Extracting audio...", "cyan")
             audio_data = self.engine.extract_audio(video_path)
             
             self.update_status("Transcribing (Whisper)...", "orange")
-            transcript = self.engine.transcribe(audio_data)
+            result = self.engine.transcribe(audio_data, callback=self.engine_callback)
             
             # Switch back to main thread for UI/Dialogs
-            self.after(0, lambda: self.finish_processing(video_path, transcript))
+            self.after(0, lambda: self.finish_processing(video_path, result, should_burn))
             
         except Exception as e:
             self.after(0, lambda: self.handle_error(str(e)))
 
-    def finish_processing(self, video_path, transcript):
+    def finish_processing(self, video_path, result, should_burn):
         """Cleans up UI and prompts to save."""
         self.progress_bar.stop()
         self.progress_bar.grid_forget()
         self.btn_select.configure(state="normal")
         self.combo_model.configure(state="normal")
+        self.check_burn.configure(state="normal")
         self.update_status("Finished!", "#2ecc71")
 
-        # Save Logic
-        suggested_name = os.path.splitext(os.path.basename(video_path))[0] + ".txt"
+        transcript_text = result["text"].strip()
+        segments = result.get("segments", [])
+
+        # 1. Save Text/SRT Result
+        suggested_name = os.path.splitext(os.path.basename(video_path))[0]
         save_path = filedialog.asksaveasfilename(
-            title="Save Transcript",
+            title="Save Transcription/Subtitles",
             initialfile=suggested_name,
-            defaultextension=".txt",
-            filetypes=(("Text files", "*.txt"), ("All files", "*.*"))
+            filetypes=(("Text files", "*.txt"), ("Subtitles", "*.srt"), ("All files", "*.*"))
         )
         
         if save_path:
+            if save_path.endswith(".srt"):
+                content = self.engine.generate_srt(segments)
+            else:
+                content = transcript_text
+                
             with open(save_path, "w", encoding="utf-8") as f:
-                f.write(transcript)
-            messagebox.showinfo("Success", "Transcript saved successfully!")
+                f.write(content)
+            
+            # 2. Handle Video Burning if requested
+            if should_burn:
+                self.handle_video_burn(video_path, segments, suggested_name)
+            else:
+                messagebox.showinfo("Success", f"File saved successfully to:\n{save_path}")
         else:
-            messagebox.showwarning("Cancelled", "Transcript was not saved.")
+            messagebox.showwarning("Cancelled", "Transcription was not saved.")
+
+    def handle_video_burn(self, video_path, segments, suggested_name):
+        """Helper to manage the video encoding process."""
+        output_video = filedialog.asksaveasfilename(
+            title="Save Subtitled Video",
+            initialfile=f"{suggested_name}_subtitled.mp4",
+            filetypes=(("MP4 Video", "*.mp4"), ("All files", "*.*"))
+        )
+
+        if output_video:
+            # We need the SRT content in a file for FFmpeg to read
+            srt_content = self.engine.generate_srt(segments)
+            
+            # Use a background thread for the heavy encoding task
+            self.update_status("Burning subtitles... (May take a while)", "orange")
+            self.btn_select.configure(state="disabled")
+            
+            def burn_task():
+                try:
+                    # Create a temporary SRT file
+                    with tempfile.NamedTemporaryFile(suffix=".srt", delete=False, mode="w", encoding="utf-8") as tf:
+                        tf.write(srt_content)
+                        temp_srt_path = tf.name
+                    
+                    try:
+                        self.engine.burn_subtitles(video_path, temp_srt_path, output_video)
+                        self.after(0, lambda: messagebox.showinfo("Success", f"Video saved successfully to:\n{output_video}"))
+                        self.update_status("Video Complete!", "#2ecc71")
+                    finally:
+                        # Clean up the temp file
+                        if os.path.exists(temp_srt_path):
+                            os.remove(temp_srt_path)
+                except Exception as e:
+                    self.after(0, lambda: self.handle_error(str(e)))
+                finally:
+                    self.after(0, lambda: self.btn_select.configure(state="normal"))
+
+            threading.Thread(target=burn_task, daemon=True).start()
+        else:
+            messagebox.showinfo("Finished", "Transcription saved, but video export was cancelled.")
 
     def handle_error(self, error_msg):
         """Handles errors by updating status and showing a dialog."""
