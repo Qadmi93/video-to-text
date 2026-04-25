@@ -5,36 +5,20 @@ import datetime
 import math
 import tempfile
 import numpy as np
+from faster_whisper import WhisperModel
 import whisper
+import vosk
+import json
 import imageio_ffmpeg
 import torch
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-# --- Business Logic: Transcription Engine ---
+# --- Business Logic: Transcription Engines ---
 
-class TranscriptionEngine:
-    """Handles the heavy lifting of audio extraction and transcription."""
+class BaseEngine:
+    """Common functionality for all transcription engines."""
     
-    def __init__(self, model_size="base"):
-        self.model_size = model_size
-        self._model = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    def set_model_size(self, size):
-        """Updates the model size and clears the cached model if it changed."""
-        if size != self.model_size:
-            self.model_size = size
-            self._model = None # Clear cached model to force reload
-
-    @property
-    def model(self):
-        """Lazy loading of the Whisper model."""
-        if self._model is None:
-            print(f"Loading Whisper model: {self.model_size}...")
-            self._model = whisper.load_model(self.model_size, device=self.device)
-        return self._model
-
     def extract_audio(self, video_path):
         """Extracts audio from video and returns it as a 16kHz mono numpy array."""
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -65,7 +49,7 @@ class TranscriptionEngine:
         if process.returncode != 0:
             raise RuntimeError(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
 
-        return np.concatenate(audio_chunks).astype(np.float32) / 32768.0
+        return np.concatenate(audio_chunks)
 
     def format_timestamp(self, seconds: float):
         """Converts seconds to SRT timestamp format: HH:MM:SS,mmm"""
@@ -78,7 +62,6 @@ class TranscriptionEngine:
             time_part = str_td
             milli_part = "000"
             
-        # Ensure HH:MM:SS format
         parts = time_part.split(":")
         if len(parts[0]) == 1:
             parts[0] = "0" + parts[0]
@@ -87,7 +70,7 @@ class TranscriptionEngine:
         return f"{time_part},{milli_part}"
 
     def generate_srt(self, segments):
-        """Converts Whisper segments into a formatted SRT string."""
+        """Converts segments into a formatted SRT string."""
         srt_content = ""
         for i, segment in enumerate(segments, start=1):
             start = self.format_timestamp(segment['start'])
@@ -96,43 +79,136 @@ class TranscriptionEngine:
             srt_content += f"{i}\n{start} --> {end}\n{text}\n\n"
         return srt_content
 
-    def transcribe(self, audio_array, callback=None):
-        """Runs the transcription using the Whisper model."""
-        result = self.model.transcribe(
-            audio_array, 
-            fp16=torch.cuda.is_available(),
-            verbose=False
-        )
-        
-        # If a callback is provided, we simulate the live feed by iterating
-        if callback and "segments" in result:
-            for segment in result["segments"]:
-                callback(segment)
-
-        return result
-
     def burn_subtitles(self, video_path, srt_path, output_path):
         """Hardcodes subtitles into a video file using FFmpeg filters."""
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        
-        # FFmpeg subtitle filter needs specific escaping for Windows paths
-        # Convert C:\path\file.srt to C\\:/path/file.srt
         escaped_path = srt_path.replace("\\", "/").replace(":", "\\:")
         
         cmd = [
-            ffmpeg_exe,
-            "-y", # Overwrite output if it exists
-            "-i", video_path,
+            ffmpeg_exe, "-y", "-i", video_path,
             "-vf", f"subtitles='{escaped_path}'",
-            "-c:a", "copy", # Copy audio stream without re-encoding to save time
-            output_path
+            "-c:a", "copy", output_path
         ]
         
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
-        
         if process.returncode != 0:
             raise RuntimeError(f"FFmpeg burning error: {stderr.decode('utf-8', errors='ignore')}")
+
+class FasterWhisperEngine(BaseEngine):
+    def __init__(self, model_size="base"):
+        self.model_size = model_size
+        self._model = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def set_model_size(self, size):
+        if size != self.model_size:
+            self.model_size = size
+            self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            print(f"Loading Faster-Whisper model: {self.model_size}...")
+            compute_type = "int8" if self.device == "cpu" else "float16"
+            self._model = WhisperModel(self.model_size, device=self.device, compute_type=compute_type)
+        return self._model
+
+    def transcribe(self, audio_data, callback=None):
+        audio_float = audio_data.astype(np.float32) / 32768.0
+        segments, info = self.model.transcribe(audio_float, beam_size=5)
+        
+        all_segments = []
+        full_text = ""
+        for segment in segments:
+            seg_dict = {'text': segment.text, 'start': segment.start, 'end': segment.end}
+            all_segments.append(seg_dict)
+            full_text += segment.text + " "
+            if callback: callback(seg_dict)
+        return {"text": full_text.strip(), "segments": all_segments}
+
+class StandardWhisperEngine(BaseEngine):
+    def __init__(self, model_size="base"):
+        self.model_size = model_size
+        self._model = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def set_model_size(self, size):
+        if size != self.model_size:
+            self.model_size = size
+            self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            print(f"Loading Standard Whisper model: {self.model_size}...")
+            self._model = whisper.load_model(self.model_size, device=self.device)
+        return self._model
+
+    def transcribe(self, audio_data, callback=None):
+        audio_float = audio_data.astype(np.float32) / 32768.0
+        result = self.model.transcribe(audio_float, fp16=torch.cuda.is_available())
+        if callback and "segments" in result:
+            for segment in result["segments"]:
+                callback(segment)
+        return result
+
+class VoskEngine(BaseEngine):
+    def __init__(self, model_size="small"):
+        self.model_size = model_size
+        self._model = None
+
+    def set_model_size(self, size):
+        pass
+
+    @property
+    def model(self):
+        if self._model is None:
+            print("Loading Vosk model...")
+            model_path = None
+            for item in os.listdir("."):
+                if os.path.isdir(item) and "vosk-model" in item:
+                    model_path = item
+                    break
+            
+            if not model_path:
+                print("Vosk model not found. Using default path 'model'.")
+                model_path = "model"
+            
+            try:
+                self._model = vosk.Model(model_path)
+            except Exception as e:
+                raise RuntimeError(f"Vosk model error: {e}. Please ensure a Vosk model folder is present in the project directory.")
+        return self._model
+
+    def transcribe(self, audio_data, callback=None):
+        rec = vosk.KaldiRecognizer(self.model, 16000)
+        rec.SetWords(True)
+        
+        full_text = ""
+        all_segments = []
+        
+        chunk_size = 4000
+        for i in range(0, len(audio_data), chunk_size):
+            chunk = audio_data[i:i+chunk_size].tobytes()
+            if rec.AcceptWaveform(chunk):
+                res = json.loads(rec.Result())
+                text = res.get("text", "")
+                if text:
+                    full_text += text + " "
+                    seg = {"text": text, "start": i/16000.0, "end": (i+chunk_size)/16000.0}
+                    all_segments.append(seg)
+                    if callback: callback(seg)
+        
+        res = json.loads(rec.FinalResult())
+        text = res.get("text", "")
+        if text:
+            full_text += text
+            seg = {"text": text, "start": len(audio_data)/16000.0 - 1, "end": len(audio_data)/16000.0}
+            all_segments.append(seg)
+            if callback: callback(seg)
+            
+        return {"text": full_text.strip(), "segments": all_segments}
 
 # --- UI Logic: Modern Application ---
 
@@ -149,7 +225,12 @@ class VideoToTextApp(ctk.CTk):
         ctk.set_default_color_theme("blue")  # Options: "blue", "green", "dark-blue"
 
         # Engine Initialization
-        self.engine = TranscriptionEngine()
+        self.engines = {
+            "Faster-Whisper": FasterWhisperEngine(),
+            "Standard Whisper": StandardWhisperEngine(),
+            "Vosk (Offline/Fast)": VoskEngine()
+        }
+        self.active_engine_name = "Faster-Whisper"
 
         # UI Elements
         self.setup_ui()
@@ -157,24 +238,35 @@ class VideoToTextApp(ctk.CTk):
     def setup_ui(self):
         """Initializes the layout and widgets."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1) # Allow the textbox to expand
+        self.grid_rowconfigure(4, weight=1) # Allow the textbox to expand
 
         # Title/Instruction
-        self.lbl_title = ctk.CTkLabel(self, text="Video to Text", font=ctk.CTkFont(size=24, weight="bold"))
+        self.lbl_title = ctk.CTkLabel(self, text="AI Video to Text", font=ctk.CTkFont(size=24, weight="bold"))
         self.lbl_title.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-        # Model Selection Frame
+        # Engine & Model Selection Frame
         self.frame_settings = ctk.CTkFrame(self, fg_color="transparent")
-        self.frame_settings.grid(row=1, column=0, padx=20, pady=0)
+        self.frame_settings.grid(row=1, column=0, padx=20, pady=5)
         
-        self.lbl_model = ctk.CTkLabel(self.frame_settings, text="Model Size:", font=ctk.CTkFont(size=13))
-        self.lbl_model.pack(side="left", padx=10)
+        self.lbl_engine = ctk.CTkLabel(self.frame_settings, text="Engine:", font=ctk.CTkFont(size=13))
+        self.lbl_engine.pack(side="left", padx=5)
+        
+        self.combo_engine = ctk.CTkComboBox(self.frame_settings, 
+                                           values=list(self.engines.keys()), 
+                                           command=self.handle_engine_change,
+                                           width=180)
+        self.combo_engine.set("Faster-Whisper")
+        self.combo_engine.pack(side="left", padx=5)
+
+        self.lbl_model = ctk.CTkLabel(self.frame_settings, text="Size:", font=ctk.CTkFont(size=13))
+        self.lbl_model.pack(side="left", padx=5)
         
         self.combo_model = ctk.CTkComboBox(self.frame_settings, 
-                                          values=["tiny", "base", "small", "medium", "large", "turbo"], 
-                                          command=self.handle_model_change)
+                                           values=["tiny", "base", "small", "medium", "large", "turbo"], 
+                                           command=self.handle_model_change,
+                                           width=100)
         self.combo_model.set("base")
-        self.combo_model.pack(side="left", padx=10)
+        self.combo_model.pack(side="left", padx=5)
 
         # Main Action Button
         self.btn_select = ctk.CTkButton(self, text="Start Transcribe", 
@@ -185,11 +277,11 @@ class VideoToTextApp(ctk.CTk):
 
         # Burn Subtitles Checkbox
         self.check_burn = ctk.CTkCheckBox(self, text="Burn subtitles into video?")
-        self.check_burn.grid(row=4, column=0, padx=20, pady=5)
+        self.check_burn.grid(row=3, column=0, padx=20, pady=5)
 
         # Live Transcript Textbox
         self.textbox = ctk.CTkTextbox(self, height=200, corner_radius=10)
-        self.textbox.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
+        self.textbox.grid(row=4, column=0, padx=20, pady=10, sticky="nsew")
         self.textbox.insert("0.0", "Transcription will appear here...")
 
         # Status & Progress
@@ -199,9 +291,18 @@ class VideoToTextApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal", mode="indeterminate")
         self.progress_bar.set(0) # Initially empty
 
+    def handle_engine_change(self, value):
+        """Updates the active engine and adjusts UI options."""
+        self.active_engine_name = value
+        if "Vosk" in value:
+            self.combo_model.configure(state="disabled")
+        else:
+            self.combo_model.configure(state="normal")
+        self.update_status(f"Engine set to {value}", "cyan")
+
     def handle_model_change(self, value):
-        """Updates the engine model size when the dropdown changes."""
-        self.engine.set_model_size(value)
+        """Updates the active engine model size."""
+        self.engines[self.active_engine_name].set_model_size(value)
         self.update_status(f"Model set to {value}", "cyan")
 
     def update_status(self, text, color=None):
@@ -249,11 +350,13 @@ class VideoToTextApp(ctk.CTk):
     def process_video_task(self, video_path, should_burn):
         """The worker method running in a separate thread."""
         try:
-            self.update_status("Extracting audio...", "cyan")
-            audio_data = self.engine.extract_audio(video_path)
+            engine = self.engines[self.active_engine_name]
             
-            self.update_status("Transcribing (Whisper)...", "orange")
-            result = self.engine.transcribe(audio_data, callback=self.engine_callback)
+            self.update_status("Extracting audio...", "cyan")
+            audio_data = engine.extract_audio(video_path)
+            
+            self.update_status(f"Transcribing ({self.active_engine_name})...", "orange")
+            result = engine.transcribe(audio_data, callback=self.engine_callback)
             
             # Switch back to main thread for UI/Dialogs
             self.after(0, lambda: self.finish_processing(video_path, result, should_burn))
@@ -263,10 +366,12 @@ class VideoToTextApp(ctk.CTk):
 
     def finish_processing(self, video_path, result, should_burn):
         """Cleans up UI and prompts to save."""
+        engine = self.engines[self.active_engine_name]
         self.progress_bar.stop()
         self.progress_bar.grid_forget()
         self.btn_select.configure(state="normal")
         self.combo_model.configure(state="normal")
+        self.combo_engine.configure(state="normal")
         self.check_burn.configure(state="normal")
         self.update_status("Finished!", "#2ecc71")
 
@@ -283,7 +388,7 @@ class VideoToTextApp(ctk.CTk):
         
         if save_path:
             if save_path.endswith(".srt"):
-                content = self.engine.generate_srt(segments)
+                content = engine.generate_srt(segments)
             else:
                 content = transcript_text
                 
@@ -300,6 +405,7 @@ class VideoToTextApp(ctk.CTk):
 
     def handle_video_burn(self, video_path, segments, suggested_name):
         """Helper to manage the video encoding process."""
+        engine = self.engines[self.active_engine_name]
         output_video = filedialog.asksaveasfilename(
             title="Save Subtitled Video",
             initialfile=f"{suggested_name}_subtitled.mp4",
@@ -308,7 +414,7 @@ class VideoToTextApp(ctk.CTk):
 
         if output_video:
             # We need the SRT content in a file for FFmpeg to read
-            srt_content = self.engine.generate_srt(segments)
+            srt_content = engine.generate_srt(segments)
             
             # Use a background thread for the heavy encoding task
             self.update_status("Burning subtitles... (May take a while)", "orange")
@@ -322,7 +428,7 @@ class VideoToTextApp(ctk.CTk):
                         temp_srt_path = tf.name
                     
                     try:
-                        self.engine.burn_subtitles(video_path, temp_srt_path, output_video)
+                        engine.burn_subtitles(video_path, temp_srt_path, output_video)
                         self.after(0, lambda: messagebox.showinfo("Success", f"Video saved successfully to:\n{output_video}"))
                         self.update_status("Video Complete!", "#2ecc71")
                     finally:
