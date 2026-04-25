@@ -386,6 +386,14 @@ class VideoToTextApp(ctk.CTk):
         # Window Configuration
         self.title("Video to Text Transcriber")
         self.geometry("600x600")
+        
+        # Set Window Icon
+        if os.path.exists("app_icon.ico"):
+            try:
+                self.iconbitmap("app_icon.ico")
+            except Exception:
+                pass
+
         ctk.set_appearance_mode("dark")  # Options: "System", "Light", "Dark"
         ctk.set_default_color_theme("blue")  # Options: "blue", "green", "dark-blue"
 
@@ -398,7 +406,7 @@ class VideoToTextApp(ctk.CTk):
             "AssemblyAI (Cloud)": AssemblyAIEngine(),
             "Groq (Cloud/Fast)": GroqEngine()
         }
-        self.active_engine_name = "Faster-Whisper"
+        self.active_engine_name = "Groq (Cloud/Fast)"
         self.config_file = "config.json"
         self.settings = self.load_settings()
 
@@ -446,7 +454,7 @@ class VideoToTextApp(ctk.CTk):
                                            values=list(self.engines.keys()), 
                                            command=self.handle_engine_change,
                                            width=180)
-        self.combo_engine.set("Faster-Whisper")
+        self.combo_engine.set(self.active_engine_name)
         self.combo_engine.pack(side="left", padx=5)
 
         self.lbl_model = ctk.CTkLabel(self.frame_settings, text="Size:", font=ctk.CTkFont(size=13))
@@ -501,6 +509,9 @@ class VideoToTextApp(ctk.CTk):
         self.progress_bar.grid(row=7, column=0, padx=20, pady=10)
         self.progress_bar.set(0) # Initially empty
         self.progress_bar.grid_forget()
+
+        # Apply initial engine UI state
+        self.handle_engine_change(self.active_engine_name)
 
     def handle_engine_change(self, value):
         """Updates the active engine and adjusts UI options."""
