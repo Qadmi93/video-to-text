@@ -162,3 +162,36 @@ graph TD
 ---
 *This log is maintained to ensure continuity in development sessions.*
 
+### Session 5: Data Transformation & Progress Reporting (2026-04-25)
+**Current Status:** Implemented live transcription and SRT formatting.
+**Focus:** SRT formatting, Callback patterns, and Segment-level UI updates.
+
+### Learning Note: Data Transformation (Raw to SRT)
+*   **Raw Output:** Whisper's `result["segments"]` is a list of dictionaries.
+*   **SRT Standard:** Requires a specific sequence: [Index] -> [Timestamp Range] -> [Text] -> [Blank Line].
+*   **Formatting Logic:** Converting floating-point seconds (e.g., 12.5s) into `00:00:12,500` using Python's `math` or `datetime` modules.
+
+### Learning Note: The Callback Pattern (Inter-class Communication)
+*   **The Problem:** The Engine is "locked" inside a loop during transcription. The UI has no idea how far along it is.
+*   **The Solution:** Passing a function (a "callback") into the engine. The engine calls this function every time it completes a segment. 
+*   **Visual Feedback:** This transforms the app from a "Wait and See" tool into an interactive "Real-time" tool.
+
+---
+
+### Session 6: Video Encoding & Hardcoded Subtitles (2026-04-25)
+**Current Status:** Implemented video "burning" capability.
+**Focus:** FFmpeg Video Filters (-vf), Path Escaping, and Render Progress.
+
+### Learning Note: "Hardcoding" vs. "Softcoding"
+*   **Softcoding:** Subtitles are a separate stream in the file (like our .srt). Users can toggle them.
+*   **Hardcoding (Burning):** The text is "painted" onto the pixels of the video. It works on every device but cannot be turned off.
+
+### Learning Note: The FFmpeg Subtitles Filter
+*   **Syntax:** `ffmpeg -i input -vf "subtitles=filename" output`.
+*   **Windows Pathing Gotcha:** FFmpeg's filter expects "Unix-style" paths. We must convert `C:\path\to\file` into something like `C\\:/path/to/file` for the filter to work correctly on Windows.
+
+### Learning Note: Resource Intensive Tasks
+*   **Encoding:** This uses the CPU/GPU heavily. We need to ensure the UI remains responsive and provides feedback during the (potentially long) render process.
+
+---
+*This log is maintained to ensure continuity in development sessions.*
