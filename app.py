@@ -482,6 +482,10 @@ class VideoToTextApp(ctk.CTk):
         self.check_translate = ctk.CTkCheckBox(self.frame_options, text="Translate to English")
         self.check_translate.pack(side="left", padx=10)
 
+        self.check_txt = ctk.CTkCheckBox(self.frame_options, text="Create TXT file")
+        self.check_txt.select() # Default to checked for convenience
+        self.check_txt.pack(side="left", padx=10)
+
         self.check_burn = ctk.CTkCheckBox(self.frame_options, text="Burn subtitles")
         self.check_burn.pack(side="left", padx=10)
 
@@ -580,6 +584,7 @@ class VideoToTextApp(ctk.CTk):
         self.btn_select.configure(state="disabled")
         self.combo_model.configure(state="disabled")
         self.check_burn.configure(state="disabled")
+        self.check_txt.configure(state="disabled")
         self.check_translate.configure(state="disabled")
         self.lbl_lang.configure(text="")
         self.textbox.delete("0.0", "end")
@@ -590,11 +595,12 @@ class VideoToTextApp(ctk.CTk):
 
         # Background Execution
         should_burn = self.check_burn.get()
+        should_create_txt = self.check_txt.get()
         should_translate = self.check_translate.get()
         task = "translate" if should_translate else "transcribe"
         
         thread = threading.Thread(target=self.process_video_task, 
-                                  args=(file_path, should_burn, task), 
+                                  args=(file_path, should_burn, should_create_txt, task), 
                                   daemon=True)
         thread.start()
 
@@ -602,7 +608,7 @@ class VideoToTextApp(ctk.CTk):
         """Retrieves the API key from the entry field."""
         return self.entry_api.get().strip()
 
-    def process_video_task(self, video_path, should_burn, task):
+    def process_video_task(self, video_path, should_burn, should_create_txt, task):
         """The worker method running in a separate thread."""
         try:
             engine = self.engines[self.active_engine_name]
@@ -629,13 +635,13 @@ class VideoToTextApp(ctk.CTk):
                 self.after(0, lambda: self.lbl_lang.configure(text=lang_text))
 
             # Switch back to main thread for UI/Dialogs
-            self.after(0, lambda: self.finish_processing(video_path, result, should_burn))
+            self.after(0, lambda: self.finish_processing(video_path, result, should_burn, should_create_txt))
             
         except Exception as e:
             error_msg = str(e)
             self.after(0, lambda: self.handle_error(error_msg))
 
-    def finish_processing(self, video_path, result, should_burn):
+    def finish_processing(self, video_path, result, should_burn, should_create_txt):
         """Cleans up UI and prompts to save."""
         engine = self.engines[self.active_engine_name]
         self.progress_bar.stop()
@@ -644,36 +650,49 @@ class VideoToTextApp(ctk.CTk):
         self.combo_model.configure(state="normal")
         self.combo_engine.configure(state="normal")
         self.check_burn.configure(state="normal")
+        self.check_txt.configure(state="normal")
         self.check_translate.configure(state="normal")
         self.update_status("Finished!", "#2ecc71")
 
         transcript_text = result["text"].strip()
         segments = result.get("segments", [])
-
-        # 1. Save Text/SRT Result
         suggested_name = os.path.splitext(os.path.basename(video_path))[0]
-        save_path = filedialog.asksaveasfilename(
-            title="Save Transcription/Subtitles",
-            initialfile=suggested_name,
-            filetypes=(("Text files", "*.txt"), ("Subtitles", "*.srt"), ("All files", "*.*"))
-        )
-        
-        if save_path:
-            if save_path.endswith(".srt"):
-                content = engine.generate_srt(segments)
-            else:
-                content = transcript_text
-                
-            with open(save_path, "w", encoding="utf-8") as f:
-                f.write(content)
+
+        # 1. Save Text/SRT Result if requested
+        if should_create_txt:
+            save_path = filedialog.asksaveasfilename(
+                title="Save Transcription/Subtitles",
+                initialfile=suggested_name,
+                filetypes=(("Text files", "*.txt"), ("Subtitles", "*.srt"), ("All files", "*.*"))
+            )
             
-            # 2. Handle Video Burning if requested
+            if save_path:
+                if save_path.endswith(".srt"):
+                    content = engine.generate_srt(segments)
+                else:
+                    content = transcript_text
+                    
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                
+                # 2. Handle Video Burning if requested
+                if should_burn:
+                    self.handle_video_burn(video_path, segments, suggested_name)
+                else:
+                    messagebox.showinfo("Success", f"File saved successfully to:\n{save_path}")
+            else:
+                # If user cancels the text save, still ask if they want to burn video if that was checked
+                if should_burn:
+                    self.handle_video_burn(video_path, segments, suggested_name)
+                else:
+                    messagebox.showwarning("Cancelled", "Transcription was not saved.")
+        else:
+            # If TXT was NOT requested, check if Burn was
             if should_burn:
                 self.handle_video_burn(video_path, segments, suggested_name)
             else:
-                messagebox.showinfo("Success", f"File saved successfully to:\n{save_path}")
-        else:
-            messagebox.showwarning("Cancelled", "Transcription was not saved.")
+                # Just show a finished message since nothing to save/burn
+                messagebox.showinfo("Finished", "Transcription complete. (No export requested)")
 
     def handle_video_burn(self, video_path, segments, suggested_name):
         """Helper to manage the video encoding process."""

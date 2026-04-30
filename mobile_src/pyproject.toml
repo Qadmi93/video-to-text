@@ -1,0 +1,13 @@
+[project]
+name = "video-to-text-mobile"
+version = "0.1.0"
+description = "Mobile Video to Text Transcriber using Groq"
+dependencies = [
+    "flet",
+    "groq"
+]
+
+[tool.flet]
+app-type = "app"
+main-module = "main"
+assets-dir = "assets"

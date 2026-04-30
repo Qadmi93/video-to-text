@@ -21,3 +21,9 @@ model/
 
 # Ignore secret API keys
 config.json
+
+# Flet and Build artifacts
+build/
+.flet/
+dist/
+*.apk
