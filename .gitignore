@@ -27,3 +27,4 @@ build/
 .flet/
 dist/
 *.apk
+.flet_cache/

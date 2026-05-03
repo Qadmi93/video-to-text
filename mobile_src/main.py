@@ -39,12 +39,10 @@ class MobileGroqEngine:
 
 async def main(page: ft.Page):
     page.title = "Groq Video-to-Text"
-    page.theme_mode = "dark"
-    page.window_width = 400
-    page.window_height = 800
-    page.window_resizable = False
-    page.scroll = "adaptive"
-    page.padding = 30
+    page.theme_mode = ft.ThemeMode.DARK
+    page.scroll = ft.ScrollMode.ADAPTIVE
+    page.padding = 20
+    page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     
     # Pre-initialize FilePicker
     file_picker = ft.FilePicker()
@@ -69,19 +67,21 @@ async def main(page: ft.Page):
         can_reveal_password=True,
         value=initial_key,
         border_color="cyan700",
-        hint_text="Enter your API key..."
+        hint_text="Enter your API key...",
+        width=350
     )
     
     status_text = ft.Text("Ready", color="grey400", size=16)
-    progress_bar = ft.ProgressBar(width=400, color="cyan", visible=False)
+    progress_bar = ft.ProgressBar(width=350, color="cyan", visible=False)
     
     result_box = ft.TextField(
         label="Transcription Result", 
         multiline=True, 
-        min_lines=10, 
-        max_lines=15, 
+        min_lines=8, 
+        max_lines=12, 
         read_only=True,
-        border_color="grey700"
+        border_color="grey700",
+        width=350
     )
 
     async def handle_select_file(e):
@@ -89,15 +89,21 @@ async def main(page: ft.Page):
         status_text.value = "Opening file picker..."
         page.update()
         
-        result = await file_picker.pick_files(allow_multiple=False)
-        
-        if result and result.files:
-            selected_video_path = result.files[0].path
-            btn_select.text = f"Selected: {result.files[0].name}"
-            btn_select.color = "green"
-            btn_start.disabled = False
-        
-        status_text.value = "Ready"
+        try:
+            result = await file_picker.pick_files(
+                allow_multiple=False,
+                type=ft.FilePickerType.VIDEO
+            )
+            
+            if result and result.files:
+                selected_video_path = result.files[0].path
+                btn_select.text = f"Selected: {result.files[0].name}"
+                btn_select.color = "green"
+                btn_start.disabled = False
+            
+            status_text.value = "Ready"
+        except Exception as ex:
+            status_text.value = f"Picker Error: {str(ex)}"
         page.update()
 
     async def start_transcription(e):
@@ -144,38 +150,41 @@ async def main(page: ft.Page):
 
     btn_select = ft.ElevatedButton(
         "Select Video", 
-        icon="video_library", 
+        icon=ft.icons.VIDEO_LIBRARY, 
         on_click=handle_select_file,
-        width=400,
+        width=350,
         height=50
     )
     
     btn_start = ft.ElevatedButton(
         "Start Transcription", 
-        icon="bolt", 
+        icon=ft.icons.BOLT, 
         on_click=start_transcription,
         disabled=True,
-        width=400,
+        width=350,
         height=50,
         style=ft.ButtonStyle(bgcolor="cyan900", color="white")
     )
 
     page.add(
-        ft.Column(
-            [
-                ft.Text("Mobile Transcriber", size=32, weight="bold", color="cyan"),
-                ft.Text("Cloud-optimized for Android", size=14, italic=True),
-                ft.Text("Note: Max file size is 25MB (Groq limit)", size=12, color="grey500"),
-                ft.Divider(height=20),
-                api_input,
-                btn_select,
-                btn_start,
-                status_text,
-                progress_bar,
-                result_box,
-            ],
-            horizontal_alignment="center",
-            spacing=25
+        ft.SafeArea(
+            ft.Column(
+                [
+                    ft.Text("Mobile Transcriber", size=28, weight="bold", color="cyan"),
+                    ft.Text("Cloud-optimized for Android", size=14, italic=True),
+                    ft.Text("Note: Max file size is 25MB", size=12, color="grey500"),
+                    ft.Divider(height=10),
+                    api_input,
+                    btn_select,
+                    btn_start,
+                    status_text,
+                    progress_bar,
+                    result_box,
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=20,
+                scroll=ft.ScrollMode.ADAPTIVE
+            )
         )
     )
 
