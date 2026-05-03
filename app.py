@@ -572,8 +572,13 @@ class VideoToTextApp(ctk.CTk):
     def handle_select_file(self):
         """Opens file dialog and starts processing."""
         file_path = filedialog.askopenfilename(
-            title="Select Video",
-            filetypes=(("MP4 files", "*.mp4"), ("All files", "*.*"))
+            title="Select Video or Audio",
+            filetypes=(
+                ("Media files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.mp3 *.wav *.m4a *.flac"),
+                ("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv"),
+                ("Audio files", "*.mp3 *.wav *.m4a *.flac"),
+                ("All files", "*.*")
+            )
         )
         
         if file_path:
@@ -700,7 +705,7 @@ class VideoToTextApp(ctk.CTk):
         output_video = filedialog.asksaveasfilename(
             title="Save Subtitled Video",
             initialfile=f"{suggested_name}_subtitled.mp4",
-            filetypes=(("MP4 Video", "*.mp4"), ("All files", "*.*"))
+            filetypes=(("MP4 Video", "*.mp4"), ("MKV Video", "*.mkv"), ("All files", "*.*"))
         )
 
         if output_video:

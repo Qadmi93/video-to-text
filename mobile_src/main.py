@@ -92,7 +92,8 @@ async def main(page: ft.Page):
         try:
             result = await file_picker.pick_files(
                 allow_multiple=False,
-                type=ft.FilePickerType.VIDEO
+                type=ft.FilePickerType.CUSTOM,
+                allowed_extensions=["mp4", "mkv", "avi", "mov", "webm", "flv", "mp3", "wav", "m4a", "flac"]
             )
             
             if result and result.files:
@@ -149,7 +150,7 @@ async def main(page: ft.Page):
         page.update()
 
     btn_select = ft.ElevatedButton(
-        "Select Video", 
+        "Select Video/Audio", 
         icon=ft.icons.VIDEO_LIBRARY, 
         on_click=handle_select_file,
         width=350,
