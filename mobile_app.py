@@ -8,7 +8,7 @@ import imageio_ffmpeg
 from groq import Groq
 
 class MobileGroqEngine:
-    def __init__(self, api_key=None):
+    def __init__(self, api_key="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"):
         self.api_key = api_key
 
     def extract_audio(self, video_path):
@@ -54,53 +54,9 @@ async def main(page: ft.Page):
     file_picker = ft.FilePicker()
     page.overlay.append(file_picker)
     
-    # Config File Logic (Shared with Desktop App)
-    config_file = "config.json"
-    
-    def load_saved_key():
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, "r") as f:
-                    data = json.load(f)
-                    return data.get("api_keys", {}).get("Groq (Cloud/Fast)", "")
-            except:
-                pass
-        return ""
-
-    def save_key(key):
-        data = {"api_keys": {}}
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, "r") as f:
-                    data = json.load(f)
-            except:
-                pass
-        
-        if "api_keys" not in data:
-            data["api_keys"] = {}
-        
-        data["api_keys"]["Groq (Cloud/Fast)"] = key
-        
-        try:
-            with open(config_file, "w") as f:
-                json.dump(data, f, indent=4)
-        except:
-            pass
-
     # State management
     selected_video_path = None
     engine = MobileGroqEngine()
-    initial_key = load_saved_key()
-
-    # UI Elements
-    api_input = ft.TextField(
-        label="Groq API Key", 
-        password=True, 
-        can_reveal_password=True,
-        value=initial_key,
-        border_color="cyan700",
-        hint_text="Enter your API key..."
-    )
     
     status_text = ft.Text("Ready", color="grey400", size=16)
     progress_bar = ft.ProgressBar(width=400, color="cyan", visible=False)
@@ -133,14 +89,7 @@ async def main(page: ft.Page):
 
     async def start_transcription(e):
         nonlocal selected_video_path
-        if not api_input.value:
-            page.snack_bar = ft.SnackBar(ft.Text("Please enter an API Key!"))
-            page.snack_bar.open = True
-            page.update()
-            return
-
-        save_key(api_input.value)
-        engine.api_key = api_input.value
+        # API Key is now hardcoded in MobileGroqEngine
         
         btn_start.disabled = True
         btn_select.disabled = True
@@ -193,7 +142,6 @@ async def main(page: ft.Page):
                 ft.Text("Mobile Transcriber", size=32, weight="bold", color="cyan"),
                 ft.Text("Cloud-optimized for Android", size=14, italic=True),
                 ft.Divider(height=20),
-                api_input,
                 btn_select,
                 btn_start,
                 status_text,

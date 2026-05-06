@@ -46,7 +46,8 @@ if exist mobile_src (
 
 echo Starting Flet build for APK...
 echo This will use the persistent cache in .flet_cache.
-flet build apk --yes
+echo Compiling a universal APK for maximum device compatibility (32-bit & 64-bit)...
+flet build apk --yes --flutter-build-args="--target-platform=android-arm,android-arm64,android-x64"
 
 echo ==========================================
 echo Build process finished. 
