@@ -4,10 +4,20 @@ version = "0.1.0"
 description = "Mobile Video to Text Transcriber using Groq"
 dependencies = [
     "flet",
-    "groq"
+    "groq",
+    "flet-permission-handler",
 ]
 
 [tool.flet]
 app-type = "app"
 main-module = "main"
 assets-dir = "assets"
+
+[tool.flet.android]
+permissions = [
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.READ_MEDIA_VIDEO",
+    "android.permission.READ_MEDIA_AUDIO",
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+]

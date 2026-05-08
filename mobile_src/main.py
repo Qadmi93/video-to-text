@@ -1,10 +1,10 @@
 import os
 import flet as ft
-import tempfile
 import asyncio
-import subprocess
 import json
+import datetime
 import logging
+from flet_permission_handler import PermissionHandler, Permission
 from groq import Groq
 
 # Configure logging to show up in logcat
@@ -40,7 +40,66 @@ class MobileGroqEngine:
                 )
         
         response = await asyncio.to_thread(call_groq)
-        return response.text
+        
+        segments = []
+        raw_segments = getattr(response, "segments", [])
+        for s in raw_segments:
+            seg = {
+                "text": s.get("text", "") if isinstance(s, dict) else getattr(s, "text", ""),
+                "start": s.get("start", 0.0) if isinstance(s, dict) else getattr(s, "start", 0.0),
+                "end": s.get("end", 0.0) if isinstance(s, dict) else getattr(s, "end", 0.0),
+            }
+            segments.append(seg)
+            
+        return {"text": response.text, "segments": segments}
+
+    def format_timestamp(self, seconds: float):
+        """Converts seconds to SRT timestamp format: HH:MM:SS,mmm"""
+        tdelta = datetime.timedelta(seconds=seconds)
+        str_td = str(tdelta)
+        if "." in str_td:
+            time_part, micro_part = str_td.split(".")
+            milli_part = micro_part[:3].ljust(3, "0")
+        else:
+            time_part = str_td
+            milli_part = "000"
+            
+        parts = time_part.split(":")
+        if len(parts[0]) == 1:
+            parts[0] = "0" + parts[0]
+        time_part = ":".join(parts)
+            
+        return f"{time_part},{milli_part}"
+
+    def generate_srt(self, segments):
+        """Converts segments into a formatted SRT string."""
+        srt_content = ""
+        for i, segment in enumerate(segments, start=1):
+            start = self.format_timestamp(segment['start'])
+            end = self.format_timestamp(segment['end'])
+            text = segment['text'].strip()
+            srt_content += f"{i}\n{start} --> {end}\n{text}\n\n"
+        return srt_content
+
+    def save_srt_file(self, video_path, srt_content):
+        """Saves SRT subtitle file to the public Downloads folder."""
+        # Use just the filename (not full path) to avoid content URI issues on Android
+        video_filename = os.path.basename(video_path)
+        base_name, _ = os.path.splitext(video_filename)
+        srt_filename = f"{base_name}.srt"
+        
+        # Try public Downloads folder first (visible in Files app)
+        downloads_dir = "/storage/emulated/0/Download"
+        if os.path.isdir(downloads_dir):
+            srt_path = os.path.join(downloads_dir, srt_filename)
+        else:
+            # Fallback to app's own files directory
+            srt_path = os.path.join(os.getcwd(), srt_filename)
+        
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+        logger.info(f"SRT file saved to: {srt_path}")
+        return srt_path
 
 async def main(page: ft.Page):
     try:
@@ -54,8 +113,15 @@ async def main(page: ft.Page):
         # Health check UI
         page.add(ft.Text("UI Engine: OK", color="green", size=10))
 
-
-        # FilePicker setup (Updated for Flet 0.84.0 Service pattern)
+        # Request storage permissions at startup
+        ph = PermissionHandler()
+        page.overlay.append(ph)
+        page.update()
+        try:
+            storage_perm = await ph.request_async(Permission.STORAGE)
+            logger.info(f"Storage permission status: {storage_perm}")
+        except Exception as pe:
+            logger.warning(f"Permission request failed (may be normal on desktop): {pe}")
         file_picker = ft.FilePicker()
         page.services.append(file_picker)
 
@@ -101,6 +167,8 @@ async def main(page: ft.Page):
             border_color="grey700",
             width=350
         )
+        
+        check_save_srt = ft.Checkbox(label="Save SRT Subtitle File", value=True)
         async def start_transcription(e):
             nonlocal selected_video_path
             # API Key is now hardcoded in MobileGroqEngine
@@ -119,10 +187,30 @@ async def main(page: ft.Page):
                 status_text.value = "Uploading to Groq..."
                 page.update()
                 
-                transcript = await engine.transcribe(selected_video_path)
+                result = await engine.transcribe(selected_video_path)
+                transcript = result["text"]
+                segments = result["segments"]
+                
                 result_box.value = transcript
-                status_text.value = "Finished!"
+                status_text.value = "Transcription Finished!"
                 status_text.color = "green"
+                page.update()
+
+                if check_save_srt.value and segments:
+                    status_text.value = "Generating SRT file..."
+                    status_text.color = "cyan"
+                    page.update()
+                    
+                    try:
+                        srt_content = engine.generate_srt(segments)
+                        srt_path = await asyncio.to_thread(
+                            engine.save_srt_file, selected_video_path, srt_content
+                        )
+                        status_text.value = f"Done! SRT saved:\n{os.path.basename(srt_path)}\n\nOpen with VLC or MX Player!"
+                        status_text.color = "green"
+                    except Exception as srt_ex:
+                        status_text.value = f"SRT Save Error: {str(srt_ex)}"
+                        status_text.color = "red"
                     
             except Exception as ex:
                 status_text.value = f"Error: {str(ex)}"
@@ -160,6 +248,7 @@ async def main(page: ft.Page):
                         ft.Text("Cloud-optimized for Android", size=14, italic=True),
                         ft.Text("Note: Max file size is 25MB", size=12, color="grey500"),
                         ft.Divider(height=10),
+                        check_save_srt,
                         btn_select,
                         btn_start,
                         status_text,
