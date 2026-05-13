@@ -118,7 +118,7 @@ async def main(page: ft.Page):
         page.overlay.append(ph)
         page.update()
         try:
-            storage_perm = await ph.request_async(Permission.STORAGE)
+            storage_perm = await ph.request(Permission.STORAGE)
             logger.info(f"Storage permission status: {storage_perm}")
         except Exception as pe:
             logger.warning(f"Permission request failed (may be normal on desktop): {pe}")

@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 echo ==========================================
 echo Optimized Flet Android Build Script
@@ -39,6 +40,12 @@ if exist venv\Scripts\activate (
 :: Navigate to where the mobile source code lives
 if exist mobile_src (
     cd mobile_src
+)
+
+:: Aggressively clean previous build artifacts
+if exist build (
+    echo Cleaning previous build directory...
+    rmdir /s /q build
 )
 
 echo Starting Flet build for APK...

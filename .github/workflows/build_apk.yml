@@ -37,7 +37,7 @@ jobs:
       - name: Build APK
         run: |
           cd mobile_src
-          flet build apk --compile-packages
+          flet build apk --clear-cache --compile-packages
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
