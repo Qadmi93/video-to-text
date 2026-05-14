@@ -228,5 +228,20 @@ graph TD
 3.  **Portability:** Ensure all changes are committed and pushed to GitHub to prevent data loss in case of hardware failure.
 
 ---
-**SAVE POINT: 2026-05-13**
-*Documentation reorganized into `README.md` and `CONTEXT.md`. Project status stabilized. Ready for Mobile FFmpeg implementation.*
+### Session 9: Infrastructure & Backup Architecture (2026-05-14)
+**Current Status:** System storage mapped and backup infrastructure established.
+**Focus:** Chat history preservation, `.gemini` folder management, and Knowledge Item strategy.
+
+### Learning Note: The "Hidden" Timeline
+*   **Discovery:** While code is in Git, the "Reasoning" is hidden in `~/.gemini/antigravity`.
+*   **Infrastructure:** Identified the raw log location (`brain/<id>/overview.txt`) and protocol buffer storage.
+*   **Portability:** Planned a Directory Junction to move system data to the `E:` drive without breaking the application logic.
+
+### Structural Update: `docs/ai_logs/`
+*   Created a dedicated directory for manual session snapshots.
+*   **Initial Entry:** `docs/ai_logs/2026-05-14_infrastructure_and_backup.md`.
+*   **Strategy:** This folder will be committed to GitHub, ensuring that the "Memory" of the AI follows the project, even if the local system is formatted.
+
+---
+**SAVE POINT: 2026-05-14**
+*Infrastructure mapped. AI Log directory initialized. Ready to proceed with project migration to E: drive.*
