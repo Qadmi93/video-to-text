@@ -83,23 +83,81 @@ class MobileGroqEngine:
 
     def save_srt_file(self, video_path, srt_content):
         """Saves SRT subtitle file to the public Downloads folder."""
-        # Use just the filename (not full path) to avoid content URI issues on Android
         video_filename = os.path.basename(video_path)
         base_name, _ = os.path.splitext(video_filename)
         srt_filename = f"{base_name}.srt"
         
-        # Try public Downloads folder first (visible in Files app)
         downloads_dir = "/storage/emulated/0/Download"
         if os.path.isdir(downloads_dir):
             srt_path = os.path.join(downloads_dir, srt_filename)
         else:
-            # Fallback to app's own files directory
             srt_path = os.path.join(os.getcwd(), srt_filename)
         
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
         logger.info(f"SRT file saved to: {srt_path}")
         return srt_path
+
+    async def burn_subtitles(self, video_path, srt_path, output_path, ffmpeg_bin):
+        """Hardcodes subtitles into the video using the injected FFmpeg library."""
+        # Convert paths for FFmpeg subtitles filter (escaped for Windows-like/Unix paths)
+        # On Android, it's Unix-style, but we still need to escape colons if they exist
+        clean_srt_path = srt_path.replace(":", "\\:")
+        
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-i", video_path,
+            "-vf", f"subtitles='{clean_srt_path}'",
+            "-c:a", "copy",
+            output_path
+        ]
+        
+        logger.info(f"Running FFmpeg: {' '.join(cmd)}")
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            error_msg = stderr.decode().strip()
+            logger.error(f"FFmpeg Error: {error_msg}")
+            raise Exception(f"FFmpeg failed: {error_msg}")
+        
+        return output_path
+
+def get_ffmpeg_path():
+    """Locates the injected libffmpeg.so on the Android filesystem."""
+    # Common locations for native libraries in Android APKs
+    potential_paths = [
+        # Check current working directory (rare)
+        os.path.join(os.getcwd(), "libffmpeg.so"),
+        # Check standard Android native library path for the app
+        os.path.join(os.path.dirname(os.getcwd()), "lib", "arm64", "libffmpeg.so"),
+        os.path.join(os.path.dirname(os.getcwd()), "lib", "arm64-v8a", "libffmpeg.so"),
+    ]
+    
+    # Also check the dynamic __file__ path if possible
+    try:
+        app_lib_dir = os.path.join(os.environ.get("ANDROID_PRIVATE_DATA", ""), "lib")
+        potential_paths.append(os.path.join(app_lib_dir, "libffmpeg.so"))
+    except:
+        pass
+
+    for path in potential_paths:
+        if os.path.exists(path):
+            logger.info(f"Found FFmpeg at: {path}")
+            # Ensure it's executable
+            os.chmod(path, 0o755)
+            return path
+            
+    # Final fallback: check if it's in the PATH (unlikely on Android)
+    import shutil
+    return shutil.which("ffmpeg")
 
 async def main(page: ft.Page):
     try:
@@ -110,8 +168,15 @@ async def main(page: ft.Page):
         page.padding = 20
         page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
         
-        # Health check UI
-        page.add(ft.Text("UI Engine: OK", color="green", size=10))
+        # Check for FFmpeg at startup
+        ffmpeg_path = get_ffmpeg_path()
+        ffmpeg_status = "FFmpeg: READY" if ffmpeg_path else "FFmpeg: MISSING (Subtitles burning disabled)"
+        ffmpeg_color = "green" if ffmpeg_path else "orange"
+        
+        page.add(ft.Row([
+            ft.Text("UI Engine: OK", color="green", size=10),
+            ft.Text(ffmpeg_status, color=ffmpeg_color, size=10)
+        ], alignment=ft.MainAxisAlignment.CENTER))
 
         # Request storage permissions at startup
         ph = PermissionHandler()
@@ -122,6 +187,7 @@ async def main(page: ft.Page):
             logger.info(f"Storage permission status: {storage_perm}")
         except Exception as pe:
             logger.warning(f"Permission request failed (may be normal on desktop): {pe}")
+            
         file_picker = ft.FilePicker()
         page.services.append(file_picker)
 
@@ -129,7 +195,6 @@ async def main(page: ft.Page):
             status_text.value = "Opening picker..."
             page.update()
             try:
-                # In Flet 0.84.0, pick_files is async and returns results directly
                 files = await file_picker.pick_files(
                     allow_multiple=False,
                     file_type=ft.FilePickerFileType.CUSTOM,
@@ -169,9 +234,14 @@ async def main(page: ft.Page):
         )
         
         check_save_srt = ft.Checkbox(label="Save SRT Subtitle File", value=True)
+        check_burn_video = ft.Checkbox(
+            label="Burn Subtitles into Video (MP4)", 
+            value=False,
+            disabled=(not ffmpeg_path)
+        )
+
         async def start_transcription(e):
             nonlocal selected_video_path
-            # API Key is now hardcoded in MobileGroqEngine
             
             btn_start.disabled = True
             btn_select.disabled = True
@@ -181,9 +251,8 @@ async def main(page: ft.Page):
             page.update()
 
             try:
-                # Validate file size (Groq has 25MB limit)
+                # 1. Transcribe with Groq
                 await asyncio.to_thread(engine.validate_file, selected_video_path)
-                
                 status_text.value = "Uploading to Groq..."
                 page.update()
                 
@@ -196,20 +265,38 @@ async def main(page: ft.Page):
                 status_text.color = "green"
                 page.update()
 
-                if check_save_srt.value and segments:
+                # 2. Generate and Save SRT
+                srt_path = None
+                if (check_save_srt.value or check_burn_video.value) and segments:
                     status_text.value = "Generating SRT file..."
                     status_text.color = "cyan"
                     page.update()
                     
+                    srt_content = engine.generate_srt(segments)
+                    srt_path = await asyncio.to_thread(
+                        engine.save_srt_file, selected_video_path, srt_content
+                    )
+                    status_text.value = f"SRT saved: {os.path.basename(srt_path)}"
+                    page.update()
+
+                # 3. Burn Subtitles (Optional)
+                if check_burn_video.value and srt_path and ffmpeg_path:
+                    status_text.value = "Burning subtitles... (This may take a while)"
+                    status_text.color = "orange"
+                    page.update()
+                    
+                    base_name, _ = os.path.splitext(selected_video_path)
+                    # For Android, we save the burned video to the same Downloads folder
+                    video_filename = os.path.basename(selected_video_path)
+                    v_name, _ = os.path.splitext(video_filename)
+                    output_video = os.path.join("/storage/emulated/0/Download", f"{v_name}_subtitled.mp4")
+                    
                     try:
-                        srt_content = engine.generate_srt(segments)
-                        srt_path = await asyncio.to_thread(
-                            engine.save_srt_file, selected_video_path, srt_content
-                        )
-                        status_text.value = f"Done! SRT saved:\n{os.path.basename(srt_path)}\n\nOpen with VLC or MX Player!"
+                        await engine.burn_subtitles(selected_video_path, srt_path, output_video, ffmpeg_path)
+                        status_text.value = f"Success! Video saved to:\nDownloads/{os.path.basename(output_video)}"
                         status_text.color = "green"
-                    except Exception as srt_ex:
-                        status_text.value = f"SRT Save Error: {str(srt_ex)}"
+                    except Exception as burn_ex:
+                        status_text.value = f"Burning Error: {str(burn_ex)}"
                         status_text.color = "red"
                     
             except Exception as ex:
@@ -232,7 +319,7 @@ async def main(page: ft.Page):
         )
         
         btn_start = ft.ElevatedButton(
-            "Start Transcription", 
+            "Start Processing", 
             on_click=start_transcription,
             disabled=True,
             width=350,
@@ -245,10 +332,10 @@ async def main(page: ft.Page):
                 ft.Column(
                     [
                         ft.Text("Mobile Transcriber", size=28, weight="bold", color="cyan"),
-                        ft.Text("Cloud-optimized for Android", size=14, italic=True),
-                        ft.Text("Note: Max file size is 25MB", size=12, color="grey500"),
+                        ft.Text("Cloud Transcribe + Local Burning", size=14, italic=True),
                         ft.Divider(height=10),
                         check_save_srt,
+                        check_burn_video,
                         btn_select,
                         btn_start,
                         status_text,
@@ -263,7 +350,6 @@ async def main(page: ft.Page):
         )
     except Exception as e:
         logger.error(f"Fatal error in main: {str(e)}")
-        # If possible, show the error on the page
         try:
             page.add(ft.Text(f"CRITICAL ERROR: {str(e)}", color="red"))
         except:
